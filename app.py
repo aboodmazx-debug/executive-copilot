@@ -73,15 +73,14 @@ class UnifiedExecutiveOutput(BaseModel):
 @st.cache_resource
 def get_chain(api_key):
     llm = ChatGroq(
-        model_name="qwen/qwen3.8-27b",
+        model_name="llama-3.1-8b-instant",
         groq_api_key=api_key,
         temperature=0.2,
-        max_tokens=1500
+        max_tokens=900
     )
     parser = PydanticOutputParser(pydantic_object=UnifiedExecutiveOutput)
     
-    template = """/no_think
-أنت نظام وخبير حوكمة التواصل المؤسسي التنفيذي.
+    template = """أنت نظام وخبير حوكمة التواصل المؤسسي التنفيذي.
 أجب مباشرة بصيغة JSON المطلوبة فقط دون أي مقدمات.
 
 المدخلات:
