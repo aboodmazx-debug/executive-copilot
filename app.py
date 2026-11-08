@@ -7,6 +7,10 @@ from pydantic import BaseModel, Field
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import FastEmbedEmbeddings
+from langchain_community.vectorstores import FAISS
 
 # إعداد عنوان الصفحة وتخطيطها العريض
 st.set_page_config(page_title="Executive Brand-Voice Copilot", page_icon="🏢", layout="wide")
@@ -14,10 +18,33 @@ st.set_page_config(page_title="Executive Brand-Voice Copilot", page_icon="🏢",
 # تنسيق CSS لضبط اتجاه الواجهة بالكامل من اليمين لليسار (RTL)
 st.markdown("""
     <style>
+    /* اتجاه عام من اليمين لليسار */
     .stApp { direction: rtl; text-align: right; }
-    div[data-testid="stMarkdownContainer"], .stTextInput, .stTextArea, .stSelectbox, .stRadio {
+    .block-container { padding-top: 2rem; max-width: 1250px; }
+    div[data-testid="stMarkdownContainer"], .stTextInput, .stTextArea, .stSelectbox,
+    .stRadio, .stSlider label, div[data-testid="stCaptionContainer"], div[data-testid="stAlert"] {
         direction: rtl; text-align: right;
     }
+    .stTextArea textarea, .stTextInput input { direction: rtl; text-align: right; line-height: 1.8; }
+    /* القوائم النقطية: النقطة بجانب النص وبمسافات مضبوطة */
+    div[data-testid="stMarkdownContainer"] ul, div[data-testid="stMarkdownContainer"] ol {
+        direction: rtl; text-align: right; padding-right: 1.4rem; padding-left: 0; margin: 0.2rem 0 0.8rem 0;
+    }
+    div[data-testid="stMarkdownContainer"] li { margin-bottom: 0.2rem; padding-right: 0.3rem; }
+    div[data-testid="stMarkdownContainer"] li p { margin: 0; }
+    /* بطاقات التقييم */
+    div[data-testid="stMetric"] {
+        direction: rtl; text-align: right; background: rgba(128,128,128,0.10);
+        border: 1px solid rgba(128,128,128,0.25); border-radius: 12px; padding: 0.8rem 1rem;
+    }
+    div[data-testid="stMetricValue"] { font-size: 1.3rem; }
+    div[data-testid="stMetricValue"] > div { white-space: normal; overflow: visible; text-overflow: clip; }
+    div[data-testid="stMetricLabel"] { justify-content: flex-start; }
+    /* الشريط المنزلق يبقى بشكله الطبيعي */
+    div[data-testid="stSlider"] > div { direction: ltr; }
+    div[data-testid="stSlider"] label { direction: rtl; }
+    /* المصادر */
+    div[data-testid="stExpander"] { direction: rtl; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -69,19 +96,23 @@ class UnifiedExecutiveOutput(BaseModel):
     detected_strengths: List[str] = Field(description="أبرز نقاط القوة في الرسالة")
     potential_risks: List[str] = Field(description="أي غموض أو ملاحظات تدقيقية")
     verdict: str = Field(description="القرار النهائي: معتمد للإرسال / يحتاج مراجعة طفيفة / مرفوض")
+    applied_guidelines: List[str] = Field(description="الإرشادات والسياسات المسترجعة من قاعدة المعرفة التي طُبقت فعلاً")
 
 @st.cache_resource
 def get_chain(api_key):
     llm = ChatGroq(
-        model_name="openai/gpt-oss-20b",  # أو openai/gpt-oss-120b
+        model_name="openai/gpt-oss-20b",
         groq_api_key=api_key,
         temperature=0.2,
-        max_tokens=1800  # مساحة كافية لمنع انقطاع الـ JSON
+        max_tokens=2200
     )
     parser = PydanticOutputParser(pydantic_object=UnifiedExecutiveOutput)
-    
+
     template = """أنت خبير حوكمة التواصل المؤسسي التنفيذي.
 مهمتك: صياغة المخرجات بإيجاز واحترافية عالية مع الالتزام التام بإغلاق هيكل الـ JSON كاملاً دون انقطاع.
+
+الإرشادات المؤسسية المسترجعة من قاعدة المعرفة (التزم بها في الصياغة والتدقيق ولا تخترع سياسات غير موجودة فيها):
+{context}
 
 المدخلات:
 - الملاحظات: {raw_notes}
@@ -91,17 +122,46 @@ def get_chain(api_key):
 
 المطلوب:
 1. استخراج القرارات والمهام والمخاطر بنقاط موجزة ومركزة.
-2. كتابة إيميل رسمي موجز ومباشر يعكس النبرة المطلوبة بدقة دون إطالة مفرطة.
-3. كتابة تقرير التدقيق وإغلاق كائن الـ JSON بشكل سليم 100%.
+2. كتابة إيميل رسمي موجز ومباشر يعكس النبرة المطلوبة بدقة دون إطالة مفرطة، وفق دليل النبرة والقوالب الواردة في الإرشادات المسترجعة.
+3. تدقيق الإيميل مقابل السياسات المسترجعة (مثل سياسات التأخير والميزانية) وكتابة تقرير التدقيق.
+4. ذكر السياسات التي طُبقت فعلاً في applied_guidelines، وإغلاق كائن الـ JSON بشكل سليم 100%.
 
 {format_instructions}"""
 
     prompt = PromptTemplate(
         template=template,
-        input_variables=["raw_notes", "tone", "audience", "language"],
+        input_variables=["raw_notes", "tone", "audience", "language", "context"],
         partial_variables={"format_instructions": parser.get_format_instructions()}
     )
     return prompt | llm | parser
+
+# ===================== طبقة RAG =====================
+KB_DIR = "knowledge_base"
+
+@st.cache_resource(show_spinner="جاري بناء قاعدة المعرفة (RAG)...")
+def get_vectorstore():
+    # 1) تحميل المستندات
+    documents = DirectoryLoader(
+        KB_DIR, glob="*.txt", loader_cls=TextLoader, loader_kwargs={"encoding": "utf-8"}
+    ).load()
+    # 2) التقسيم إلى مقاطع
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500, chunk_overlap=80, separators=["\n\n", "\n", ".", "،", " ", ""]
+    )
+    chunks = splitter.split_documents(documents)
+    # 3) التضمينات + 4) قاعدة المتجهات
+    embeddings = FastEmbedEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    return FAISS.from_documents(chunks, embeddings)
+
+def retrieve_guidelines(query, k=4):
+    # 5) المسترجع (Retriever)
+    retriever = get_vectorstore().as_retriever(search_type="similarity", search_kwargs={"k": k})
+    return retriever.invoke(query)
+
+def format_docs(docs):
+    return "\n\n".join(
+        f"[المصدر: {os.path.basename(d.metadata.get('source', 'غير معروف'))}]\n{d.page_content}" for d in docs
+    )
 
 # العنوان الرئيسي والتحقق من المفتاح
 st.title("🏢 نظام المساعد التنفيذي لصياغة وتدقيق المراسلات")
@@ -135,6 +195,7 @@ with col1:
     )
     in_audience = st.text_input("الجمهور المستهدف", value="الإدارة التنفيذية ورؤساء الأقسام")
     in_lang = st.radio("اللغة", ["Arabic", "English"], horizontal=True)
+    in_k = st.slider("عدد المقاطع المسترجعة (k)", 1, 8, 4)
     btn_run = st.button("🚀 بدء المعالجة والتوليد", type="primary", use_container_width=True)
 
 with col2:
@@ -151,39 +212,52 @@ with col2:
                 "دبلوماسي وتعاوني (Diplomatic)": "Diplomatic, highly professional, collaborative, and constructive",
                 "مهني وودي (Friendly)": "Professional yet friendly, supportive, and motivating"
             }
-            
+
             with st.spinner("جاري التحليل والصياغة والتدقيق..."):
                 try:
+                    # 1) الاسترجاع (Retrieval) من قاعدة المعرفة
+                    docs = retrieve_guidelines(f"{in_tone} | {in_audience} | {in_notes}", k=in_k)
                     chain = get_chain(api_key)
+                    # 2) التوليد المعزز (Augmented Generation)
                     res = chain.invoke({
                         "raw_notes": in_notes,
                         "tone": tone_dict[in_tone],
                         "audience": in_audience,
-                        "language": in_lang
+                        "language": in_lang,
+                        "context": format_docs(docs)
                     })
-                    
+
                     save_log(in_notes, res.summary_and_actions, res.draft_email, res.clarity_score, res.tone_alignment, res.verdict)
-                    
-                    st.text_area("1. الملخص وبنود العمل والقرارات", value=res.summary_and_actions, height=140)
-                    st.text_area("2. مسودة الإيميل الرسمي", value=res.draft_email, height=180)
-                    
+
+                    st.text_area("1. الملخص وبنود العمل والقرارات", value=res.summary_and_actions, height=230)
+                    st.text_area("2. مسودة الإيميل الرسمي", value=res.draft_email, height=320)
+
                     st.markdown("### 📋 تقييم جودة الخطاب")
                     m1, m2, m3 = st.columns(3)
                     m1.metric("درجة الوضوح", f"{res.clarity_score}/10")
                     m2.metric("مطابقة النبرة", res.tone_alignment)
                     m3.metric("القرار النهائي", res.verdict)
-                    
+
                     st.markdown("**نقاط القوة:**")
                     for s in res.detected_strengths:
                         st.markdown(f"- {s}")
-                        
+
                     st.markdown("**الملاحظات ومواضع التدقيق:**")
                     if res.potential_risks:
                         for r in res.potential_risks:
                             st.markdown(f"- {r}")
                     else:
                         st.markdown("- لا توجد ملاحظات سلبية.")
-                        
+
+                    st.markdown("**الإرشادات والسياسات المطبقة:**")
+                    for g in res.applied_guidelines:
+                        st.markdown(f"- {g}")
+
+                    with st.expander("📚 مصادر RAG: المقاطع التي استرجعها النظام من قاعدة المعرفة", expanded=True):
+                        for i, d in enumerate(docs, 1):
+                            st.markdown(f"**{i}.** `{os.path.basename(d.metadata.get('source', ''))}`")
+                            st.caption(d.page_content)
+
                     st.success("تم حفظ السجل تلقائياً في قاعدة بيانات SQLite.")
                 except Exception as e:
                     st.error(f"حدث خطأ أثناء المعالجة: {e}")
